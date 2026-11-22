@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charms — layers that won’t hide who you are</title>
+<link rel="icon" type="image/png" href="/assets/brand/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fragment+Mono&family=Inter:wght@400;500;600&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/vue@3.4.21/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vue-router@4.3.0/dist/vue-router.global.prod.js"></script>
+<script>
+const { createApp, reactive, ref, computed, onMounted, watch } = Vue;
+const { createRouter, createWebHistory, useRoute, useRouter } = VueRouter;
+const inr = n => '₹' + Number(n).toLocaleString('en-IN');
+const imgOf = (p, n = 0) => { const s = p.images?.[n] || (n === 0 && p.image_url) || ''; return s ? encodeURI(s) : ''; };
+const CATS = ['Base', 'Lip', 'Cheek', 'Eye'];
+
+/* ---------- seed data (used only if the API is unreachable) ---------- */
+const seedRows = [
+ ['Skin Veil Tinted Serum','Base',1299,['Ivory 01:#f3dcc4','Warm Sand 02:#e3b98f','Honey 03:#c68d5f','Espresso 04:#5b3a29'],'Sheer mineral skin tint with breathable squalane hydration.',45,'Bestseller'],
+ ['Cloud Matte Lip Tint','Lip',799,['Rose Clay:#c47a78','Spiced Fig:#8a4054','Terracotta:#b9593b','Berry Stain:#8e2a4a'],'Soft-focus blurred lip pigment that wears without drying.',60,null],
+ ['Dew Flush Liquid Blush','Cheek',899,['Petal Pink:#f2a3b3','Sunlit Peach:#f4a77f','Mauve Mist:#b98396'],'Weightless serum blush that melts into bare or tinted skin.',38,null],
+ ['Micro-Define Brow Gel','Eye',699,['Clear:#e8e8e8','Soft Taupe:#a58f7c','Warm Brown:#7a5236','Espresso:#3d2a20'],'Flexible-hold peptide brow gel with a precision spoolie.',50,null],
+ ['Silk Press Setting Powder','Base',1150,['Translucent Fair:#f6e7d6','Medium:#dcb48c','Deep:#9a6a47'],'Talc-free micro-milled powder that softens shine naturally.',25,null],
+ ['Lash Lift Tubing Mascara','Eye',950,['Carbon Black:#1a1a1a','Rich Espresso:#3b2a22'],'Smudge-resistant polymer tubing mascara; removes with warm water.',42,'New']
+];
+const slugify = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const SEED = seedRows.map((r, i) => ({ id: i + 1, slug: slugify(r[0]), name: r[0], category: r[1], price: r[2],
+  shades: r[3].map(s => { const [name, hex] = s.split(':'); return { name, hex }; }), description: r[4], stock: r[5], badge: r[6], image_url: '' }));
+
+/* ---------- store + api ---------- */
+const store = reactive({
+  products: [], offline: false, loaded: false,
+  cart: JSON.parse(localStorage.getItem('charms-cart') || '[]'),
+  user: JSON.parse(localStorage.getItem('charms-user') || 'null'),
+  discount: null, drawer: false
+});
+watch(() => store.cart, v => localStorage.setItem('charms-cart', JSON.stringify(v)), { deep: true });
+watch(() => store.user, v => localStorage.setItem('charms-user', JSON.stringify(v)), { deep: true });
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || data.message || 'Something went wrong. Try again.');
+  return data;
+}
+async function loadProducts() {
+  try { store.products = await api('/api/products'); store.offline = false; }
+  catch { store.products = SEED.map(p => ({ ...p })); store.offline = true; }
+  store.loaded = true;
+}
+const stockInfo = p => p.stock <= 0 ? { t: 'Out of stock', c: 'amber' } : p.stock <= 10 ? { t: `Only ${p.stock} left`, c: 'amber' } : { t: 'In stock', c: 'green' };
+const subtotal = computed(() => store.cart.reduce((s, i) => s + i.price * i.qty, 0));
+const discountAmt = computed(() => { const d = store.discount; if (!d) return 0;
+  return d.type === 'percent' ? Math.round(subtotal.value * d.value / 100) : Math.min(d.value, subtotal.value); });
+const total = computed(() => Math.max(0, subtotal.value - discountAmt.value));
+const cartCount = computed(() => store.cart.reduce((s, i) => s + i.qty, 0));
+async function logout() { await api('/api/auth/logout', { method: 'POST' }).catch(() => {}); store.user = null; store.drawer = false; router.push('/'); }
+function addToCart(p, shade, qty = 1) {
+  const sh = shade || p.shades[0] || { name: 'Default', hex: '#ddd' };
+  const line = store.cart.find(i => i.id === p.id && i.shade === sh.name);
+  const max = p.stock;
+  if (line) line.qty = Math.min(max, line.qty + qty);
+  else store.cart.push({ id: p.id, slug: p.slug, name: p.name, shade: sh.name, hex: sh.hex, price: p.price, qty: Math.min(max, qty), img: imgOf(p) });
+  store.drawer = true;
+}
+const vCount = { mounted(el, b) { const end = b.value, io = new IntersectionObserver(([e]) => { if (!e.isIntersecting) return; io.disconnect();
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return; const t0 = performance.now();
+  const tick = t => { const k = Math.min(1, (t - t0) / 1200); el.textContent = Math.round(end * k) + (el.dataset.suffix || ''); if (k < 1) requestAnimationFrame(tick); };
+  requestAnimationFrame(tick); }); el.textContent = end + (el.dataset.suffix || ''); io.observe(el); } };
+
+/* ---------- shared components ---------- */
+const Product = { props: ['p', 'n'], template: `<div class="img" :style="{background: tint}"><img v-if="src" :src="src" :alt="p.name" loading="lazy">
+  <span v-if="badge" class="badge" :class="badge.c">{{ badge.t }}</span><div v-if="!src" class="obj" :style="{background: hex}"></div></div>`,
+  computed: { src() { return imgOf(this.p, this.n || 0); }, hex() { return this.p.shades?.[0]?.hex || '#ddd'; }, tint() { return this.hex + '22'; },
+    badge() { const s = stockInfo(this.p); if (this.p.stock <= 10) return s; return this.p.badge ? { t: this.p.badge, c: 'blue' } : null; } } };
+
+const Accordion = { props: ['items'], data: () => ({ open: 0 }), template: `<div>
+  <div v-for="(it, i) in items" :key="i" class="acc-row" :class="{open: open === i}">
+    <button class="acc-head" :aria-expanded="open === i" @click="open = open === i ? -1 : i"><span>{{ it.q }}</span>
+      <svg class="chev" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6l5 5 5-5"/></svg></button>
+    <div class="acc-body"><div><p>{{ it.a }}</p></div></div></div></div>`};
+
+const ProductCard = { components: { Product }, props: ['p'], data: () => ({ si: 0 }), computed: { shade() { return this.p.shades[this.si]; }, s() { return stockInfo(this.p); } },
+  methods: { inr, add() { addToCart(this.p, this.shade); } },
+  template: `<article class="card pcard">
+  <router-link :to="'/product/' + p.slug"><Product :p="{...p, shades: shade ? [shade] : []}"/></router-link>
+  <router-link :to="'/product/' + p.slug"><h3 style="font-size:18px">{{ p.name }}</h3></router-link>
+  <p class="muted" style="font-size:14px">{{ p.description }}</p>
+  <div class="row wrap" style="gap:8px"><button v-for="(sh, i) in p.shades" :key="sh.name" class="dot" :class="{on: i === si}" :style="{background: sh.hex}" :aria-label="sh.name" @click="si = i"></button>
+    <span class="light" style="font-size:12px">{{ shade && shade.name }}</span></div>
+  <div class="row between" style="margin-top:auto"><span class="num" style="font-weight:700;font-size:18px">{{ inr(p.price) }}</span>
+    <button class="pill dark sm" :disabled="p.stock <= 0" @click="add">Add to bag</button></div></article>`};
+
+const NavBar = { setup() { const open = ref(false); const r = useRoute(); watch(() => r.fullPath, () => open.value = false);
+  return { store, cartCount, open, logout, isAdmin: computed(() => store.user?.role === 'admin') }; },
+  template: `<div class="nav-wrap"><nav class="nav" aria-label="Main">
+  <router-link to="/" class="brand" aria-label="Charms home"><img src="/assets/brand/logo.png" alt="Charms" class="logo"></router-link>
+  <div class="links" :class="{show: open}"><router-link to="/shop">Shop all</router-link><router-link to="/shop?category=Base">Base</router-link>
+    <router-link to="/shop?category=Lip">Lip</router-link><router-link to="/shop?category=Cheek">Cheek</router-link><router-link to="/shop?category=Eye">Eye</router-link><router-link to="/#formulations">Formulations</router-link><a v-if="store.user" href="#" class="show-m" @click.prevent="logout">Sign out</a></div>
+  <div class="row" style="gap:8px">
+    <router-link v-if="isAdmin" to="/admin" class="pill hide-m">Admin console <span class="badge blue">Admin</span></router-link>
+    <router-link v-else-if="store.user" to="/orders" class="pill hide-m">My orders</router-link>
+    <router-link v-else to="/login" class="pill hide-m">Sign in</router-link>
+    <button v-if="store.user" class="pill hide-m" @click="logout">Sign out</button>
+    <button class="pill" @click="store.drawer = true">Bag (<span class="num">{{ cartCount }}</span>)</button>
+    <router-link :to="cartCount ? '/checkout' : '/shop'" class="pill dark hide-m">{{ cartCount ? 'Checkout' : 'Explore catalog' }}</router-link>
+    <button class="pill menu-btn" aria-label="Menu" @click="open = !open">Menu</button></div></nav></div>`};
+
+const CartDrawer = { setup() { const code = ref(''), err = ref(''), router = useRouter();
+  const apply = async () => { err.value = '';
+    try { const d = await api('/api/discounts/validate', { method: 'POST', body: { code: code.value, subtotal: subtotal.value } });
+      store.discount = { code: (d.code || code.value).toUpperCase(), type: d.type || 'flat', value: Number(d.value ?? d.discount ?? 0) };
+    } catch (e) { if (store.offline && code.value.toUpperCase() === 'CHARMS15') store.discount = { code: 'CHARMS15', type: 'percent', value: 15 }; else err.value = e.message; } };
+  const step = (i, d) => { i.qty = Math.max(0, Math.min(99, i.qty + d)); if (!i.qty) remove(i); };
+  const remove = i => store.cart.splice(store.cart.indexOf(i), 1);
+  const go = () => { store.drawer = false; router.push('/checkout'); };
+  return { store, code, err, apply, step, remove, go, inr, subtotal, discountAmt, total, cartCount }; },
+  template: `<transition name="slide"><div v-if="store.drawer"><div class="overlay" @click="store.drawer = false"></div>
+  <aside class="drawer" role="dialog" aria-label="Your bag">
+  <div class="row between"><h3 style="font-size:20px">Your bag <span class="light num" style="font-size:14px">({{ cartCount }})</span></h3><button class="x" aria-label="Close bag" @click="store.drawer = false">×</button></div>
+  <div class="body"><p v-if="!store.cart.length" class="muted">Your bag is empty. Add a shade to get started.</p>
+    <div v-for="i in store.cart" :key="i.id + i.shade" class="item"><div class="thumb" :style="{background: i.hex + '55'}"><img v-if="i.img" :src="i.img" alt=""></div>
+      <div><div class="row between"><strong style="font-size:14px">{{ i.name }}</strong><span class="num">{{ inr(i.price * i.qty) }}</span></div>
+        <div class="light" style="font-size:13px">{{ i.shade }} · {{ inr(i.price) }}</div>
+        <div class="row between" style="margin-top:6px"><div class="stepper"><button aria-label="Decrease" @click="step(i, -1)">−</button><span class="num">{{ i.qty }}</span><button aria-label="Increase" @click="step(i, 1)">+</button></div>
+          <button class="muted" style="background:none;border:0;font-size:13px;text-decoration:underline" @click="remove(i)">Remove</button></div></div></div></div>
+  <div><div class="row"><input v-model="code" placeholder="Discount code" aria-label="Discount code"><button class="pill" @click="apply">Apply</button></div>
+    <p v-if="err" style="color:var(--color-red);font-size:13px;margin-top:6px">{{ err }}</p>
+    <div class="sum" style="margin-top:12px"><div><span class="muted">Subtotal</span><span class="num">{{ inr(subtotal) }}</span></div>
+      <div v-if="store.discount" style="color:#15803d"><span>Discount ({{ store.discount.code }})</span><span class="num">−{{ inr(discountAmt) }}</span></div>
+      <div style="font-weight:700"><span>Total</span><span class="num">{{ inr(total) }}</span></div></div>
+    <button class="pill dark block" style="margin-top:12px" :disabled="!store.cart.length" @click="go">Proceed to checkout</button></div></aside></div></transition>`};
+
+const SiteFooter = { setup() { return { sub: ref(''), done: ref(false) }; }, template: `<footer class="footer"><div class="container">
+  <div class="row between wrap"><div><img src="/assets/brand/logo-white.png" alt="Charms" class="logo" style="height:32px;margin-bottom:8px"><p style="color:#aaa">Layers that won’t hide who you are</p></div>
+    <a href="mailto:harmanvirsingh0987@gmail.com" style="display:inline">harmanvirsingh0987@gmail.com</a></div>
+  <div class="grid"><div><h4>Catalog</h4><router-link to="/shop">Shop all</router-link><router-link to="/shop?category=Base">Base</router-link><router-link to="/shop?category=Lip">Lip</router-link><router-link to="/shop?category=Cheek">Cheek</router-link><router-link to="/shop?category=Eye">Eye</router-link></div>
+  <div><h4>Brand</h4><router-link to="/#formulations">Formulation standards</router-link><router-link to="/shop">Shade guide</router-link><router-link to="/#faq">FAQ</router-link><a href="mailto:harmanvirsingh0987@gmail.com">Contact</a></div>
+  <div><h4>Account</h4><router-link to="/login">Sign in</router-link><router-link to="/register">Create account</router-link><router-link to="/orders">Order lookup</router-link><router-link to="/admin">Admin portal</router-link></div>
+  <div><h4>Updates</h4><form class="row" @submit.prevent="done = true"><input v-model="sub" type="email" required placeholder="Email for restock alerts" aria-label="Email"><button class="pill light">Subscribe</button></form><p v-if="done" style="color:#86efac;font-size:13px;margin-top:8px">You’re on the list.</p></div></div>
+  <div class="bar"><span>@charm exclusives</span><span>harmanvirsingh0987@gmail.com</span></div></div></footer>`};
+
+/* ---------- views ---------- */
+const HomeView = { components: { Accordion, Product }, directives: { count: vCount },
+  setup() { const tab = ref(0); const route = useRoute();
+    const cats = [{ n: 'Base', note: 'Skin tints and powders with squalane and mineral pigments that let freckles and texture show.', shades: '7 shades' },
+      { n: 'Lip', note: 'Blurred, soft-focus color in comfortable, non-drying bases.', shades: '4 shades' },
+      { n: 'Cheek', note: 'Serum-light liquid blush that layers over bare or tinted skin.', shades: '3 shades' },
+      { n: 'Eye', note: 'Flexible-hold brow gel and tubing mascara that removes with warm water.', shades: '6 shades' }];
+    const featured = computed(() => store.products.find(p => p.category === cats[tab.value].n) || store.products[0]);
+    const faq = [{ q: 'How long does shipping take?', a: 'Orders ship within 24 hours and usually arrive in 3–5 business days across India.' },
+      { q: 'How do I find my shade?', a: 'Match your undertone using the shade names on each product. If it’s off, exchange it within 30 days.' },
+      { q: 'What is your returns policy?', a: 'Unopened items can be returned within 30 days. Shade exchanges are free.' },
+      { q: 'Are the formulas safe for sensitive skin?', a: 'Every formula is fragrance-free, non-comedogenic and dermatologist tested.' }];
+    watch(() => route.hash, h => h && setTimeout(() => document.querySelector(h)?.scrollIntoView({ behavior: 'smooth' }), 50), { immediate: true });
+    return { tab, cats, featured, faq, inr, store, addToCart, stockInfo, imgOf }; },
+  template: `<div>
+  <section class="hero"><div class="container stack">
+    <span class="announce"><b>New</b>Breathable everyday pigments</span>
+    <h1 style="max-width:900px">Layers that won’t hide who you are.</h1>
+    <p class="muted" style="max-width:560px;font-size:18px">Skin-first makeup formulated to let your natural texture show through — coverage you can forget you’re wearing.</p>
+    <div class="row"><router-link to="/shop" class="pill dark">Shop the collection</router-link><router-link to="/shop" class="pill">Explore shades</router-link></div>
+    <div class="card hero-frame"><div class="flatlay"><router-link v-for="p in store.products.slice(0, 5)" :key="p.id" :to="'/product/' + p.slug" :aria-label="p.name" class="tile" :style="{background: (p.shades[0]?.hex || '#ddd') + '33'}"><img v-if="imgOf(p)" :src="imgOf(p)" alt="" loading="lazy"></router-link></div></div></div></section>
+  <section class="container"><div class="marquee" aria-hidden="true"><div class="track"><template v-for="n in 2"><span>Vogue India</span><span>Nykaa</span><span>Elle</span><span>Allure</span><span>Sephora</span><span>Cosmopolitan</span></template></div></div>
+    <div class="grid g3" style="margin-top:32px">
+      <div class="card stat"><div class="num" v-count="94" data-suffix="%">94%</div><p class="muted">Reported bare-skin comfort after 8 hours</p></div>
+      <div class="card stat"><div class="num" v-count="18">18</div><p class="muted">Adaptive shades across undertones</p></div>
+      <div class="card stat"><div class="num" v-count="100" data-suffix="%">100%</div><p class="muted">Non-comedogenic &amp; fragrance-free formulas</p></div></div>
+    <div class="row" style="margin-top:32px;justify-content:center"><div class="avatars"><i style="background:#f2a3b3"></i><i style="background:#dcb48c"></i><i style="background:#9a6a47"></i><i style="background:#c47a78"></i></div>
+      <p class="muted" style="font-size:14px">“Finally, a tint that looks like my skin, only better.”</p></div></section>
+  <section class="section container compare" id="formulations"><div class="center"><span class="eyebrow">Why Charms</span><h2 style="margin-top:12px">Coverage without the mask</h2></div>
+    <div class="grid g2" style="margin-top:48px"><div class="card muted-card"><h3>Heavy traditional makeup</h3><ul style="margin-top:16px;padding:0">
+      <li v-for="t in ['Oxidizes mid-day','Settles into fine lines','Occlusive silicones','Chalky flash-back']" :key="t">{{ t }}<span class="badge">Common</span></li></ul></div>
+    <div class="card"><h3>Charms breathable layers</h3><ul style="margin-top:16px;padding:0">
+      <li v-for="t in ['True-to-tone mineral pigments','Flexible squalane suspension','Non-pore-clogging','Natural satin finish']" :key="t">{{ t }}<span class="badge green">Charms</span></li></ul></div></div></section>
+  <section class="container"><div class="center"><span class="eyebrow">The lineup</span><h2 style="margin-top:12px">Built for a five-minute routine</h2></div>
+    <div class="grid g2" style="margin-top:48px;align-items:start"><div>
+      <div v-for="(c, i) in cats" :key="c.n" class="acc-row" :class="{open: tab === i}"><button class="acc-head" :aria-expanded="tab === i" @click="tab = i"><span>{{ c.n }}</span>
+        <svg class="chev" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6l5 5 5-5"/></svg></button>
+        <div class="acc-body"><div><p>{{ c.note }} <span class="light">{{ c.shades }}.</span><br><router-link :to="'/shop?category=' + c.n" style="color:var(--color-accent);font-weight:500">View category</router-link></p></div></div></div></div>
+      <div v-if="featured" class="card" style="padding:16px"><router-link :to="'/product/' + featured.slug"><Product :p="featured"/></router-link>
+        <div class="row between" style="margin-top:12px"><div><strong>{{ featured.name }}</strong><div class="num muted">From {{ inr(featured.price) }}</div></div>
+          <div class="row" style="gap:6px"><span v-for="s in featured.shades" :key="s.name" class="dot" :style="{background: s.hex}" :title="s.name"></span></div></div>
+        <button class="pill dark block" style="margin-top:12px" :disabled="featured.stock <= 0" @click="addToCart(featured)">Add to bag</button></div></div></section>
+  <section class="section container" id="faq"><div class="grid g2"><div style="align-self:start;position:sticky;top:100px"><h2>Common questions</h2><p class="muted" style="margin-top:12px">Shipping, shades, returns and ingredients, answered.</p></div><Accordion :items="faq"/></div></section>
+  <section class="container"><div class="cta-card"><h2>Find your everyday shade match</h2><p>Eighteen shades, one routine, no mask. Pick yours and layer from there.</p>
+    <router-link to="/shop" class="pill light">Browse all products</router-link>
+    <div class="trust"><span>Dermatologist tested</span><span>30-day shade exchange</span><span>Ships within 24 hours</span></div></div></section></div>`};
+
+const ShopView = { components: { ProductCard },
+  setup() { const route = useRoute(), router = useRouter(); const q = ref(''), sort = ref('featured');
+    const cat = computed(() => route.query.category || 'All');
+    const setCat = c => router.push({ path: '/shop', query: c === 'All' ? {} : { category: c } });
+    const list = computed(() => { let l = store.products.filter(p => (cat.value === 'All' || p.category === cat.value) && (p.name + p.description).toLowerCase().includes(q.value.toLowerCase()));
+      if (sort.value === 'asc') l = [...l].sort((a, b) => a.price - b.price); if (sort.value === 'desc') l = [...l].sort((a, b) => b.price - a.price); return l; });
+    return { q, sort, cat, setCat, list, CATS }; },
+  template: `<div class="container" style="padding-top:40px"><span class="eyebrow">Catalog</span><h2 style="margin-top:12px">All makeup products</h2>
+  <div style="max-width:420px;margin-top:20px"><input v-model="q" type="search" placeholder="Search products" aria-label="Search products"></div>
+  <div class="pbar"><button v-for="c in ['All', ...CATS]" :key="c" class="pill" :class="{active: cat === c}" @click="setCat(c)">{{ c }}</button>
+    <select v-model="sort" style="width:auto;margin-left:auto" aria-label="Sort"><option value="featured">Featured</option><option value="asc">Price: low to high</option><option value="desc">Price: high to low</option></select></div>
+  <div class="grid g3"><ProductCard v-for="p in list" :key="p.id" :p="p"/></div>
+  <p v-if="!list.length" class="muted center" style="padding:60px 0">No products match your search. Try a different word or clear the filter.</p></div>`};
+
+const ProductView = { components: { Product, Accordion },
+  setup() { const route = useRoute(); const si = ref(0), qty = ref(1), thumb = ref(0);
+    const p = computed(() => store.products.find(x => x.slug === route.params.slug));
+    onMounted(async () => { try { const fresh = await api('/api/products/' + route.params.slug); const i = store.products.findIndex(x => x.id === fresh.id); if (i > -1) store.products[i] = fresh; } catch {} });
+    const info = computed(() => [{ q: 'Finish & coverage', a: p.value.description + ' Build from sheer to medium coverage.' },
+      { q: 'Key ingredients', a: 'Squalane, mineral pigments, peptide complex and vitamin E. Fragrance-free.' }, { q: 'How to apply', a: 'Apply with fingertips or a damp sponge; layer where you want more coverage.' }]);
+    return { p, si, qty, thumb, info, inr, stockInfo, addToCart, store, enc: encodeURI }; },
+  template: `<div class="container" style="padding-top:40px"><div v-if="!p" class="center muted" style="padding:100px 0">{{ store.loaded ? 'We couldn’t find that product.' : 'Loading…' }} <router-link to="/shop" style="color:var(--color-accent)">Back to shop</router-link></div>
+  <div v-else class="grid g2" style="gap:48px;align-items:start">
+    <div><div class="card" style="padding:12px"><Product :p="{...p, shades: [p.shades[si]]}" :n="thumb"/></div>
+      <div v-if="p.images && p.images.length > 1" class="thumbs"><button v-for="(im, t) in p.images" :key="t" :class="{on: thumb === t}" :aria-label="'Image ' + (t + 1)" @click="thumb = t"><img :src="enc(im)" alt="" loading="lazy"></button></div></div>
+    <div><span class="eyebrow">{{ p.category }}</span><h1 style="font-size:40px;margin:12px 0">{{ p.name }}</h1>
+      <div class="row"><span class="num" style="font-size:32px;font-weight:700">{{ inr(p.price) }}</span><span class="badge" :class="stockInfo(p).c">{{ stockInfo(p).t }}</span></div>
+      <p class="muted" style="margin:16px 0">{{ p.description }}</p>
+      <p style="font-weight:500;margin-bottom:10px">Selected shade: {{ p.shades[si]?.name }}</p>
+      <div class="row" style="gap:10px"><button v-for="(s, i) in p.shades" :key="s.name" class="dot lg" :class="{on: i === si}" :style="{background: s.hex}" :aria-label="s.name" @click="si = i"></button></div>
+      <div class="row" style="margin:24px 0"><div class="stepper"><button aria-label="Decrease" @click="qty = Math.max(1, qty - 1)">−</button><span class="num">{{ qty }}</span><button aria-label="Increase" @click="qty = Math.min(p.stock || 1, qty + 1)">+</button></div>
+        <button class="pill dark" style="flex:1" :disabled="p.stock <= 0" @click="addToCart(p, p.shades[si], qty)">Add to bag — <span class="num">{{ inr(p.price * qty) }}</span></button></div>
+      <Accordion :items="info"/></div></div></div>`};
+
+const CheckoutView = { setup() { const router = useRouter();
+    const f = reactive({ name: store.user?.full_name || '', email: store.user?.email || '', phone: '', street: '', city: '', state: '', pin: '', pay: 'cod' });
+    const err = ref(''), busy = ref(false), order = ref(null);
+    const submit = async () => { err.value = ''; busy.value = true;
+      const payload = { customer_name: f.name, customer_email: f.email, phone: f.phone, shipping_address: `${f.street}, ${f.city}, ${f.state} ${f.pin}`, payment_method: f.pay,
+        discount_code: store.discount?.code || null, items: store.cart.map(i => ({ product_id: i.id, selected_shade: i.shade, quantity: i.qty })) };
+      const snapshot = { items: store.cart.map(i => ({ ...i })), total: total.value };
+      try { const r = await api('/api/orders', { method: 'POST', body: payload }); order.value = { id: r.id || r.order_id, ...snapshot }; store.cart = []; store.discount = null; }
+      catch (e) { if (store.offline) { order.value = { id: 'DEMO-' + Date.now().toString().slice(-6), ...snapshot }; store.cart = []; store.discount = null; } else err.value = e.message; }
+      busy.value = false; };
+    return { f, err, busy, order, submit, store, inr, subtotal, discountAmt, total }; },
+  template: `<div class="container" style="padding-top:40px">
+  <div v-if="order" class="card authcard" style="max-width:560px"><span class="badge green">Order placed</span><h2 style="margin:12px 0">Thank you</h2>
+    <p class="muted">Order ID <strong class="num">{{ order.id }}</strong></p>
+    <div class="sum" style="margin:16px 0"><div v-for="i in order.items" :key="i.id + i.shade"><span>{{ i.name }} · {{ i.shade }} × {{ i.qty }}</span><span class="num">{{ inr(i.price * i.qty) }}</span></div>
+      <div style="font-weight:700;border-top:1px solid var(--color-border);margin-top:8px;padding-top:8px"><span>Total</span><span class="num">{{ inr(order.total) }}</span></div></div>
+    <router-link to="/shop" class="pill dark block">Continue shopping</router-link>
+    <p class="muted center" style="margin-top:12px;font-size:14px">Changed your mind? <router-link to="/orders" style="color:var(--color-accent)">Cancel or track this order</router-link></p></div>
+  <div v-else-if="!store.cart.length" class="center muted" style="padding:100px 0">Your bag is empty. <router-link to="/shop" style="color:var(--color-accent)">Browse the catalog</router-link></div>
+  <div v-else class="grid" style="grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:32px"><form class="form" @submit.prevent="submit">
+    <h2 style="font-size:32px">Checkout</h2><div v-if="err" class="alert" role="alert">{{ err }}</div>
+    <div class="f2"><div><label for="n">Full name</label><input id="n" v-model="f.name" required></div><div><label for="e">Email address</label><input id="e" v-model="f.email" type="email" required></div></div>
+    <div><label for="ph">Phone number</label><input id="ph" v-model="f.phone" type="tel" required></div>
+    <div><label for="st">Street address</label><input id="st" v-model="f.street" required></div>
+    <div class="f2"><div><label for="c">City</label><input id="c" v-model="f.city" required></div><div><label for="s">State</label><input id="s" v-model="f.state" required></div></div>
+    <div><label for="pn">PIN code</label><input id="pn" v-model="f.pin" pattern="[0-9]{6}" title="6-digit PIN code" required></div>
+    <div class="card" style="padding:16px;box-shadow:none"><label for="pay">Payment method</label><select id="pay" v-model="f.pay"><option value="cod">Cash on delivery</option><option value="card">Simulated card payment</option></select></div>
+    <button class="pill dark block" :disabled="busy">{{ busy ? 'Placing order…' : 'Place order' }}</button></form>
+    <aside class="card sticky"><h3 style="font-size:20px;margin-bottom:12px">Order summary</h3>
+      <div class="sum"><div v-for="i in store.cart" :key="i.id + i.shade"><span>{{ i.name }} <span class="light">({{ i.shade }}) × {{ i.qty }}</span></span><span class="num">{{ inr(i.price * i.qty) }}</span></div>
+      <div style="border-top:1px solid var(--color-border);margin-top:8px;padding-top:8px"><span class="muted">Subtotal</span><span class="num">{{ inr(subtotal) }}</span></div>
+      <div v-if="store.discount" style="color:#15803d"><span>Discount ({{ store.discount.code }})</span><span class="num">−{{ inr(discountAmt) }}</span></div>
+      <div style="font-weight:700"><span>Total</span><span class="num">{{ inr(total) }}</span></div></div></aside></div></div>`};
+
+const AuthView = { props: ['mode'], setup(props) { const router = useRouter(); const f = reactive({ full_name: '', email: '', password: '' }); const err = ref(''), busy = ref(false);
+    const isReg = computed(() => props.mode === 'register');
+    const submit = async () => { err.value = ''; busy.value = true;
+      try { const r = await api(isReg.value ? '/api/auth/register' : '/api/auth/login', { method: 'POST', body: f }); store.user = r.user || r;
+        router.push(store.user.role === 'admin' ? '/admin' : '/shop'); }
+      catch (e) { err.value = store.offline ? 'The server is unreachable. Start the Express API and try again.' : e.message; } busy.value = false; };
+    return { f, err, busy, isReg, submit }; },
+  template: `<div class="card authcard"><img src="/assets/brand/logo.png" alt="Charms" class="logo" style="height:26px;margin-bottom:16px">
+  <h2 style="font-size:28px;margin-bottom:20px">{{ isReg ? 'Create your account' : 'Sign in to Charms' }}</h2><div v-if="err" class="alert" role="alert">{{ err }}</div>
+  <form class="form" @submit.prevent="submit"><div v-if="isReg"><label for="fn">Full name</label><input id="fn" v-model="f.full_name" required></div>
+    <div><label for="em">Email</label><input id="em" v-model="f.email" type="email" required></div><div><label for="pw">Password</label><input id="pw" v-model="f.password" type="password" minlength="6" required></div>
+    <button class="pill dark block" :disabled="busy">{{ isReg ? 'Create account' : 'Sign in' }}</button></form>
+  <p class="muted center" style="margin-top:16px;font-size:14px"><template v-if="isReg">Already have an account? <router-link to="/login" style="color:var(--color-accent)">Sign in</router-link></template>
+    <template v-else>New to Charms? <router-link to="/register" style="color:var(--color-accent)">Create an account</router-link></template></p></div>`};
+
+const AdminView = { setup() { const tab = ref('products'), err = ref(''), showAdd = ref(false);
+    const discounts = ref([]), orders = ref([]);
+    const np = reactive({ name: '', category: 'Base', price: '', stock: '', shades: '', description: '', images: '' });
+    const nd = reactive({ code: '', type: 'percent', value: '', is_active: true });
+    const run = async fn => { err.value = ''; try { await fn(); } catch (e) { err.value = e.message; } };
+    const load = () => run(async () => { await loadProducts(); [discounts.value, orders.value] = await Promise.all([api('/api/admin/discounts'), api('/api/admin/orders')]); });
+    onMounted(load);
+    const parseShades = s => s.split(',').map(x => x.trim()).filter(Boolean).map(x => { const [name, hex] = x.split(':').map(y => y.trim()); return { name, hex: hex || '#dddddd' }; });
+    const addProduct = () => run(async () => { await api('/api/admin/products', { method: 'POST', body: { ...np, slug: slugify(np.name), price: +np.price, stock: +np.stock, shades: parseShades(np.shades), images: np.images.split(',').map(s => s.trim()).filter(Boolean) } });
+      Object.assign(np, { name: '', price: '', stock: '', shades: '', description: '', images: '' }); showAdd.value = false; await loadProducts(); });
+    const save = p => run(() => api('/api/admin/products/' + p.id, { method: 'PATCH', body: { price: +p.price, stock: +p.stock } }));
+    const remove = p => confirm(`Remove ${p.name}? This can’t be undone.`) && run(async () => { await api('/api/admin/products/' + p.id, { method: 'DELETE' }); await loadProducts(); });
+    const addDiscount = () => run(async () => { await api('/api/admin/discounts', { method: 'POST', body: { ...nd, code: nd.code.toUpperCase(), value: +nd.value } }); nd.code = ''; nd.value = ''; await load(); });
+    const toggle = d => run(async () => { d.is_active = !d.is_active; await api('/api/admin/discounts/' + d.id, { method: 'PATCH', body: { is_active: d.is_active } }); });
+    const delDiscount = d => confirm(`Delete code ${d.code}?`) && run(async () => { await api('/api/admin/discounts/' + d.id, { method: 'DELETE' }); await load(); });
+    const cancel = o => confirm(`Cancel order #${o.id}? Stock will be restored.`) && run(async () => { await api(`/api/admin/orders/${o.id}/cancel`, { method: 'POST' }); await load(); });
+    const stats = computed(() => [['Total products', store.products.length], ['Low stock items', store.products.filter(p => p.stock <= 10).length], ['Active discount codes', discounts.value.filter(d => d.is_active).length]]);
+    return { tab, err, showAdd, discounts, orders, np, nd, CATS, store, addProduct, save, remove, addDiscount, toggle, delDiscount, stats, stockInfo, inr, cancel }; },
+  template: `<div class="container" style="padding-top:40px"><span class="eyebrow">Admin console</span><h2 style="margin:12px 0 24px">Store &amp; inventory management</h2>
+  <div class="grid g3" style="margin-bottom:24px"><div v-for="s in stats" :key="s[0]" class="card stat"><div class="num" style="font-size:36px;font-weight:800">{{ s[1] }}</div><p class="muted">{{ s[0] }}</p></div></div>
+  <div class="pbar"><button v-for="t in [['products','Products & inventory'],['discounts','Discounts'],['orders','Recent orders']]" :key="t[0]" class="pill" :class="{active: tab === t[0]}" @click="tab = t[0]">{{ t[1] }}</button></div>
+  <div v-if="err" class="alert" role="alert">{{ err }}</div>
+  <template v-if="tab === 'products'"><div class="card" style="padding:20px;margin-bottom:16px"><div class="row between"><strong>Add product</strong><button class="pill sm" @click="showAdd = !showAdd">{{ showAdd ? 'Close' : 'New product' }}</button></div>
+    <form v-if="showAdd" class="form" style="margin-top:16px" @submit.prevent="addProduct"><div class="f2"><div><label>Product name</label><input v-model="np.name" required></div><div><label>Category</label><select v-model="np.category"><option v-for="c in CATS" :key="c">{{ c }}</option></select></div></div>
+      <div class="f2"><div><label>Price (₹)</label><input v-model="np.price" type="number" min="0" required></div><div><label>Initial stock</label><input v-model="np.stock" type="number" min="0" required></div></div>
+      <div><label>Shades (Name:#hex, comma-separated)</label><input v-model="np.shades" placeholder="Ivory 01:#f3dcc4, Honey 03:#c68d5f"></div>
+      <div><label>Short description</label><input v-model="np.description"></div><div><label>Image paths (comma-separated)</label><input v-model="np.images" placeholder="/images/base/photo1.jpg, /images/base/photo2.jpg"></div>
+      <button class="pill dark">Add product</button></form></div>
+    <div class="card tablewrap"><table><thead><tr><th>Product &amp; category</th><th>Shades</th><th>Price (₹)</th><th>Stock</th><th></th></tr></thead><tbody>
+      <tr v-for="p in store.products" :key="p.id"><td><strong>{{ p.name }}</strong><div class="light" style="font-size:12px">{{ p.category }}</div></td>
+        <td><span v-for="s in p.shades" :key="s.name" class="dot" :style="{background: s.hex, marginRight: '4px'}" :title="s.name"></span></td>
+        <td><input v-model="p.price" type="number" min="0" aria-label="Price"></td><td><div class="row"><input v-model="p.stock" type="number" min="0" aria-label="Stock"><span class="badge" :class="stockInfo(p).c">{{ p.stock <= 10 ? 'Low' : 'Healthy' }}</span></div></td>
+        <td><div class="row"><button class="pill dark sm" @click="save(p)">Save changes</button><button class="pill sm" @click="remove(p)">Remove</button></div></td></tr></tbody></table></div></template>
+  <template v-if="tab === 'discounts'"><form class="card form" style="padding:20px;margin-bottom:16px" @submit.prevent="addDiscount"><div class="f2"><div><label>Promo code</label><input v-model="nd.code" placeholder="CHARMS15" required></div>
+    <div><label>Discount type</label><select v-model="nd.type"><option value="percent">Percentage %</option><option value="flat">Flat ₹</option></select></div></div>
+    <div class="f2"><div><label>Discount value</label><input v-model="nd.value" type="number" min="1" required></div><div class="row" style="padding-top:22px"><button type="button" class="toggle" :class="{on: nd.is_active}" role="switch" :aria-checked="nd.is_active" aria-label="Active" @click="nd.is_active = !nd.is_active"></button><span>Active</span></div></div>
+    <button class="pill dark">Add discount</button></form>
+    <div class="card tablewrap"><table><thead><tr><th>Code</th><th>Value</th><th>Used</th><th>Active</th><th></th></tr></thead><tbody><tr v-for="d in discounts" :key="d.id"><td><strong>{{ d.code }}</strong></td>
+      <td class="num">{{ d.type === 'percent' ? d.value + '%' : inr(d.value) }}</td><td class="num">{{ d.usage_count }}</td><td><button class="toggle" :class="{on: d.is_active}" role="switch" :aria-checked="d.is_active" :aria-label="'Toggle ' + d.code" @click="toggle(d)"></button></td>
+      <td><button class="pill sm" @click="delDiscount(d)">Delete</button></td></tr></tbody></table></div></template>
+  <div v-if="tab === 'orders'" class="card tablewrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total paid</th><th>Status</th><th>Placed</th><th></th></tr></thead><tbody>
+    <tr v-for="o in orders" :key="o.id"><td class="num">#{{ o.id }}</td><td>{{ o.customer_name }}<div class="light" style="font-size:12px">{{ o.customer_email }}</div></td><td class="num">{{ o.items_count ?? o.items?.length }}</td>
+      <td class="num">{{ inr(o.total_amount) }}</td><td><span class="badge" :class="o.status === 'cancelled' ? 'amber' : 'blue'">{{ o.status }}</span></td><td class="muted">{{ new Date(o.created_at).toLocaleString('en-IN') }}</td><td><button v-if="o.status === 'placed'" class="pill sm" @click="cancel(o)">Cancel order</button></td></tr>
+    <tr v-if="!orders.length"><td colspan="7" class="muted center">No orders yet. New orders appear here after checkout.</td></tr></tbody></table></div></div>`};
+
+const OrdersView = { setup() { const router = useRouter(); const list = ref([]), err = ref(''), msg = ref(''), found = ref(null), look = reactive({ id: '', email: '' });
+  const shown = computed(() => found.value ? [found.value] : list.value);
+  onMounted(async () => { if (store.user) try { list.value = await api('/api/orders/mine'); } catch (e) { err.value = e.message; } });
+  const lookup = async () => { err.value = msg.value = ''; try { found.value = await api('/api/orders/lookup', { method: 'POST', body: look }); } catch (e) { err.value = e.message; } };
+  const cancel = async o => { if (!confirm(`Cancel order #${o.id}? This can’t be undone.`)) return; err.value = msg.value = '';
+    try { await api(`/api/orders/${o.id}/cancel`, { method: 'POST', body: { email: o.customer_email } }); o.status = 'cancelled'; msg.value = `Order #${o.id} was cancelled.`; } catch (e) { err.value = e.message; } };
+  const logout = async () => { await api('/api/auth/logout', { method: 'POST' }).catch(() => {}); store.user = null; router.push('/'); };
+  return { store, shown, found, look, err, msg, lookup, cancel, logout, inr }; },
+  template: `<div class="container" style="padding-top:40px;max-width:760px">
+  <div class="row between"><div><span class="eyebrow">Orders</span><h2 style="margin-top:12px">{{ store.user ? 'Your orders' : 'Find your order' }}</h2></div><button v-if="store.user" class="pill" @click="logout">Sign out</button></div>
+  <div v-if="err" class="alert" role="alert" style="margin-top:16px">{{ err }}</div><div v-if="msg" class="badge green" style="margin-top:16px">{{ msg }}</div>
+  <form v-if="!store.user && !found" class="card form" style="padding:24px;margin-top:24px" @submit.prevent="lookup">
+    <div class="f2"><div><label for="oi">Order number</label><input id="oi" v-model="look.id" inputmode="numeric" required></div><div><label for="oe">Email used at checkout</label><input id="oe" v-model="look.email" type="email" required></div></div>
+    <button class="pill dark">Find order</button><p class="muted" style="font-size:14px">Have an account? <router-link to="/login" style="color:var(--color-accent)">Sign in</router-link> to see all your orders.</p></form>
+  <button v-if="found" class="pill sm" style="margin-top:16px" @click="found = null">Search again</button>
+  <div v-for="o in shown" :key="o.id" class="card" style="padding:20px;margin-top:16px">
+    <div class="row between wrap"><div><strong class="num">Order #{{ o.id }}</strong><div class="light" style="font-size:13px">{{ new Date(o.created_at).toLocaleString('en-IN') }}</div></div>
+      <div class="row"><span class="badge" :class="o.status === 'cancelled' ? 'amber' : 'blue'">{{ o.status }}</span><span class="num" style="font-weight:700">{{ inr(o.total_amount) }}</span></div></div>
+    <div class="sum" style="margin:12px 0"><div v-for="(i, k) in o.items" :key="k"><span>{{ i.name }} <span class="light">({{ i.shade }}) × {{ i.quantity }}</span></span><span class="num">{{ inr(i.unit_price * i.quantity) }}</span></div></div>
+    <button v-if="o.status === 'placed'" class="pill sm" @click="cancel(o)">Cancel order</button></div>
+  <p v-if="store.user && !shown.length && !err" class="muted center" style="padding:60px 0">No orders yet. <router-link to="/shop" style="color:var(--color-accent)">Start shopping</router-link></p></div>`};
+
+/* ---------- app ---------- */
+const router = createRouter({ history: createWebHistory(), routes: [
+  { path: '/', component: HomeView }, { path: '/shop', component: ShopView }, { path: '/product/:slug', component: ProductView },
+  { path: '/checkout', component: CheckoutView }, { path: '/orders', component: OrdersView }, { path: '/login', component: AuthView, props: { mode: 'login' } },
+  { path: '/register', component: AuthView, props: { mode: 'register' } }, { path: '/admin', component: AdminView, meta: { admin: true } },
+  { path: '/:pathMatch(.*)*', redirect: '/' }],
+  scrollBehavior: (to, from, saved) => saved || (to.hash ? false : { top: 0 }) });
+router.beforeEach(to => { if (to.meta.admin && store.user?.role !== 'admin') return '/login'; });
+
+createApp({ components: { NavBar, CartDrawer, SiteFooter }, setup() { onMounted(loadProducts); },
+  template: `<NavBar/><main><router-view/></main><SiteFooter/><CartDrawer/>` }).use(router).mount('#app');
+</script>
+</body>
+</html>
